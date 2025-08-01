@@ -22,6 +22,8 @@ import (
 	stderrors "errors"
 	"fmt"
 	"math/rand"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"sigs.k8s.io/karpenter/kwok/apis"
 	"sigs.k8s.io/karpenter/kwok/apis/v1alpha1"
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -47,12 +50,50 @@ func NewCloudProvider(ctx context.Context, kubeClient client.Client, instanceTyp
 	return &CloudProvider{
 		kubeClient:    kubeClient,
 		instanceTypes: instanceTypes,
+		reservations:  map[*cloudprovider.Offering]int{},
 	}
 }
 
 type CloudProvider struct {
 	kubeClient    client.Client
 	instanceTypes []*cloudprovider.InstanceType
+	reservations  map[*cloudprovider.Offering]int
+}
+
+const (
+	LabelReservationID = apis.Group + "/reservation-id"
+)
+
+func init() {
+	v1.RestrictedLabelDomains = v1.RestrictedLabelDomains.Insert(apis.Group)
+	v1.WellKnownLabels = v1.WellKnownLabels.Insert(
+		LabelReservationID,
+	)
+	cloudprovider.ReservationIDLabel = LabelReservationID
+}
+
+func (c CloudProvider) MarkLaunched(o *cloudprovider.Offering) bool {
+	if 0 < o.ReservationCapacity {
+		avail, found := c.reservations[o]
+		if !found {
+			avail = o.ReservationCapacity
+		}
+		if 0 == avail {
+			return false
+		}
+		o.Available = 1 < avail
+		c.reservations[o] = avail - 1
+	}
+	return true
+}
+
+func (c CloudProvider) MarkTerminated(o *cloudprovider.Offering) {
+	if 0 < o.ReservationCapacity {
+		if avail, found := c.reservations[o]; found {
+			c.reservations[o] = avail + 1
+			o.Available = true
+		}
+	}
 }
 
 func (c CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v1.NodeClaim, error) {
@@ -99,6 +140,18 @@ func (c CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) erro
 			return fmt.Errorf("deleting node, %w", cloudprovider.NewNodeClaimNotFoundError(err))
 		}
 		return fmt.Errorf("deleting node, %w", err)
+	}
+	if ril, found := nodeClaim.Labels[cloudprovider.ReservationIDLabel]; found {
+		if ti := strings.SplitN(ril, ".", 2); 2 == len(ti) {
+			for j := 0; j < len(c.instanceTypes); j++ {
+				if c.instanceTypes[j].Name == ti[0] {
+					if i, err := strconv.Atoi(ti[1]); err != nil && 0 <= i && i < len(c.instanceTypes[j].Offerings) {
+						c.MarkTerminated(c.instanceTypes[j].Offerings[i])
+					}
+					break
+				}
+			}
+		}
 	}
 	return cloudprovider.NewNodeClaimNotFoundError(fmt.Errorf("instance terminated"))
 }
@@ -214,6 +267,10 @@ func (c CloudProvider) toNode(nodeClaim *v1.NodeClaim) (*corev1.Node, error) {
 		}
 	}
 
+	if cheapestOffering == nil || !c.MarkLaunched(cheapestOffering) {
+		return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("Insufficient capacity"))
+	}
+
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        newName,
@@ -258,6 +315,10 @@ func addInstanceLabels(labels map[string]string, instanceType *cloudprovider.Ins
 			ret[r.Key] = r.Values()[0]
 		}
 	}
+
+	// find out which offering we took the instance from
+	ret[cloudprovider.ReservationIDLabel] = fmt.Sprintf("%s.%d", instanceType.Name, slices.Index(instanceType.Offerings, offering))
+
 	// add in github.com/awslabs/eks-node-viewer label so that it shows up.
 	ret[v1alpha1.NodeViewerLabelKey] = fmt.Sprintf("%f", offering.Price)
 	// Kwok has some scalability limitations.
