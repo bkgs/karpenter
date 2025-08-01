@@ -74,24 +74,23 @@ func init() {
 
 func (c CloudProvider) MarkLaunched(o *cloudprovider.Offering) bool {
 	if 0 < o.ReservationCapacity {
-		avail, found := c.reservations[o]
-		if !found {
-			avail = o.ReservationCapacity
+		if o.Available {
+			if 1 < o.ReservationCapacity {
+				o.ReservationCapacity--
+			} else {
+				o.Available = false // use this as "zero" marker
+			}
 		}
-		if 0 == avail {
-			return false
-		}
-		o.Available = 1 < avail
-		c.reservations[o] = avail - 1
 	}
 	return true
 }
 
 func (c CloudProvider) MarkTerminated(o *cloudprovider.Offering) {
 	if 0 < o.ReservationCapacity {
-		if avail, found := c.reservations[o]; found {
-			c.reservations[o] = avail + 1
-			o.Available = true
+		if o.Available {
+			o.ReservationCapacity++
+		} else {
+			o.Available = true // was "zero"
 		}
 	}
 }
