@@ -145,7 +145,7 @@ func (c CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) erro
 		if ti := strings.SplitN(ril, ".", 2); 2 == len(ti) {
 			for j := 0; j < len(c.instanceTypes); j++ {
 				if c.instanceTypes[j].Name == ti[0] {
-					if i, err := strconv.Atoi(ti[1]); err != nil && 0 <= i && i < len(c.instanceTypes[j].Offerings) {
+					if i, err := strconv.Atoi(ti[1]); err == nil && 0 <= i && i < len(c.instanceTypes[j].Offerings) {
 						c.MarkTerminated(c.instanceTypes[j].Offerings[i])
 					}
 					break
